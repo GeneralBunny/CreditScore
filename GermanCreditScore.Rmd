@@ -1,0 +1,181 @@
+---
+title: Logistic Regression on GermanCredit dataset in "caret" package using R.
+output: pdf_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message = FALSE, tidy = TRUE)
+```
+
+```{r logisticReg}
+library(xlsx);
+library(Information)
+# https://cran.r-project.org/web/packages/Information/vignettes/Information-vignette.html
+library(caret) # for confusion matrix
+
+data(GermanCredit, package = "caret");
+
+AllData <- GermanCredit;
+set.seed(55);
+
+AllData$CLASS <- ifelse(AllData$Class == "Good", 1, 0);
+AllData <- subset(AllData, select = -Class);
+AllData <- subset(AllData, select = -Purpose.Vacation);
+AllData <- subset(AllData, select = -Personal.Female.Single);
+
+print("Exploratory data analysis ------------->")
+print("The dimension of the data is");
+dim(AllData);
+print("The dependent variable is CLASS");
+unique(AllData$CLASS);
+print("Some of the features are");
+head(names(AllData));
+
+print(paste("The total number of missing values is", nrow(AllData)*ncol(AllData)-table(is.na(AllData))));
+LengthOfLevels <- function(x) return(length(unique(x)));
+len <- t(data.frame(lapply(subset(AllData,select = -CLASS), LengthOfLevels)));
+print("The number of unique levels in each column");
+head(len, n=10);
+print(paste(length(len[len==2]), "columns have only two levels"));
+
+####### calculate the WOE for the independent varialbes in AllData ######
+print("Data transformation using WOE ------------->");
+IV <- create_infotables(data = AllData, y = "CLASS");
+
+# IV$Tables is a list of the IV and WOE for all the variables.
+for (i in 1:length(IV$Tables)){
+        iv <- IV$Tables[[i]]$IV[1];
+        IV$Tables[[i]]$Perc_G[1] <- 
+                (iv/IV$Tables[[i]]$WOE[1])*exp(IV$Tables[[i]]$WOE[1])/(exp(IV$Tables[[i]]$WOE[1])-1);
+        IV$Tables[[i]]$Perc_B[1] <- 
+                (iv/IV$Tables[[i]]$WOE[1])/(exp(IV$Tables[[i]]$WOE[1])-1);
+        
+        for (j in 2:nrow(IV$Tables[[i]])){
+                iv <- IV$Tables[[i]]$IV[j] - IV$Tables[[i]]$IV[j-1];
+                IV$Tables[[i]]$Perc_G[j] <- 
+                        (iv/IV$Tables[[i]]$WOE[j])*exp(IV$Tables[[i]]$WOE[j])/(exp(IV$Tables[[i]]$WOE[j])-1);
+                IV$Tables[[i]]$Perc_B[j] <- 
+                        (iv/IV$Tables[[i]]$WOE[j])/(exp(IV$Tables[[i]]$WOE[j])-1);
+        }
+        IV$Tables[[i]]$N_G <- N_Tot_G * IV$Tables[[i]]$Perc_G;
+        IV$Tables[[i]]$N_B <- N_Tot_B * IV$Tables[[i]]$Perc_B;
+}
+
+IVSummary <- IV$Summary;
+
+# replace the original data with WOE value.
+AllData2 <- subset(AllData, select = -CLASS);
+AllData_WOE <- AllData2[FALSE,];
+for (i in 1:length(IV$Tables)){
+        w<- IV$Tables[[i]];
+        range <- data.frame(WOE = numeric(nrow(w)));
+        for (j in 1:nrow(w)){
+                num <- substr(w[j,1], start = 2, stop = nchar(w[j,1])-1);
+                num <- strsplit(num, ",");
+                range$interval[j]<- list(c(as.numeric(num[[1]][1]), as.numeric(num[[1]][2])));
+                range$WOE[j] <- w$WOE[j];
+        }
+        
+        for (k in 1:nrow(AllData2)){     
+                for (l in 1:nrow(range)){
+                        if (findInterval(round(AllData2[k,i],digit=2), unlist(range$interval[l]), rightmost.closed = TRUE)==1)
+                        {AllData_WOE[k,i] <- range$WOE[l]}
+                }
+        }
+}
+AllData_WOE <- cbind(subset(AllData, select = CLASS), AllData_WOE);
+colnames(AllData_WOE)[1] <- "CLASS";
+
+head(subset(AllData,select = c("CLASS", "ResidenceDuration")));
+
+N_Tot_G <- function(data) {nrow(data[data$CLASS==1,])};
+N_Tot_B <- function(data) {nrow(data[data$CLASS==0,])};
+N_Tot_G <- N_Tot_G(AllData);
+N_Tot_B <- N_Tot_B(AllData);
+
+t1 <- subset(AllData, CLASS == 1);
+t2 <- subset(AllData, CLASS == 0);
+par(mfrow = c(1,2));
+h1 <- hist(t1$ResidenceDuration, plot = FALSE, breaks = 5);
+h1$counts=h1$counts/sum(h1$counts);
+h2 <- hist(t2$ResidenceDuration, plot = FALSE, breaks = 5);
+h2$counts=h2$counts/sum(h2$counts);
+Ylim <- range(h1$counts, h2$counts);
+plot(h1, col = rgb(0,0,1,1/4), xlab = "ResidenceDuration", ylab = "Perc_G", main = "CLASS=1 (total number = 700)");
+plot(h2, col = rgb(1,0,0,1/4), xlab = "ResidenceDuration", ylab = "Perc_B", main = "CLASS=0, (total number = 300)");
+
+w1 <- IV$Tables$ResidenceDuration;
+w1 <- data.frame(lapply(w1, function(y) if(is.numeric(y)) round(y, 3) else y));
+print(w1);
+
+
+trans <- subset(AllData_WOE, select = c("CLASS", "ResidenceDuration"));
+trans <- data.frame(lapply(trans, function(y) if(is.numeric(y)) round(y, 3) else y));
+head(trans);
+
+# plot the WOE
+par(mfrow = c(1,1));
+barplot(w1[,4], names.arg = w1[,1], main = "ResidenceDuration", ylab = "WOE");
+
+
+# 80% of the randomly selected data will be training data and the rest is test data.
+set.seed(50);
+trainNum <- sample(1:nrow(AllData), as.integer(0.8*nrow(AllData)));
+testNum <- setdiff(1:nrow(AllData), trainNum);
+
+# Using original data.
+train1 <- AllData[trainNum,];
+test1 <- AllData[testNum,];
+Model1 <- glm(CLASS~., family=binomial(link="logit"),data=train1);
+
+# Validate the model on test data (original data)
+fitted.results.p1<- predict(Model1,newdata=subset(test1, select = -CLASS),type='response');
+fitted.results.1 <- ifelse(fitted.results.p1 > 0.5,1,0);
+conMax1 <- confusionMatrix(data = fitted.results.1, reference=test1$CLASS,dnn = c("Prediction", "Actual"))$table;
+print("Logistic regression result ------------->")
+print("The confusion matrix using original data");
+print(conMax1);
+
+precision1 <- conMax1[2,2]/(conMax1[2,2]+conMax1[2,1]);
+recall1 <- conMax1[2,2]/(conMax1[2,2]+conMax1[1,2]);
+F1_1 <- (2 * precision1 * recall1) / (precision1 + recall1);
+typeI_1<- conMax1[2,1]/(conMax1[1,1]+conMax1[2,1]);
+misClasificError1 <- mean(fitted.results.1 != test1$CLASS);
+MSE1 <- mean((fitted.results.p1 - test1$CLASS)^2);
+
+############### Logistic regression using transformed data ######################
+train2 <- AllData_WOE[trainNum,];
+test2 <- AllData_WOE[testNum,];
+Model2 <- glm(CLASS~., family=binomial(link="logit"),data=train2);
+
+# Validate the model on test data (transformed data)
+fitted.results.p2<- predict(Model2,newdata=subset(test2, select = -CLASS),type='response');
+fitted.results.2 <- ifelse(fitted.results.p2 > 0.5,1,0);
+conMax2 <- confusionMatrix(data = fitted.results.2, reference=test2$CLASS,dnn = c("Prediction", "Actual"))$table;
+print("The confusion matrix using transformed data");
+print(conMax2);
+
+precision2 <- conMax2[2,2]/(conMax2[2,2]+conMax2[2,1]);
+recall2 <- conMax2[2,2]/(conMax2[2,2]+conMax2[1,2]);
+F1_2 <- (2 * precision2 * recall2) / (precision2 + recall2);
+typeI_2<- conMax2[2,1]/(conMax2[1,1]+conMax2[2,1]);
+misClasificError2 <- mean(fitted.results.2 != test2$CLASS);
+MSE2 <- mean((fitted.results.p2 - test2$CLASS)^2);
+
+############ Comparison between models ############################
+Model <- c("Original data", "Transformed data");
+Type_I <- round(c(typeI_1, typeI_2), digits = 4);
+Precision <- round(c(precision1, precision2), digits = 4);
+MSE <- round(c(MSE1, MSE2),digits = 4);
+F1Score <- round(c(F1_1, F1_2), digits = 4);
+Accuracy <- round(c(1-misClasificError1, 1-misClasificError2),digits = 4);
+result <- data.frame(Model, Type_I, Precision, Accuracy, MSE);
+print("Type_I error = fp/(fp+tn)");
+print("Precision = tp/(tp+fp)");
+print(result);
+
+###### Model 3 results##########
+print("Fitting result using transformed data ------------->")
+Model2Coe <- summary(Model2)$coefficients;
+head(Model2Coe);
+```
